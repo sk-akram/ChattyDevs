@@ -9,7 +9,15 @@
 	"compatibility_date": "2026-01-03",
 	"observability": {
 		"enabled": true
-	}
+	},
+	"d1_databases": [
+		{
+			"binding": "chattydevs_db",
+			"database_name": "chattydevs-db",
+			"database_id": "82a66bd1-c3d4-49d6-b864-51e6aeb388b4",
+			"remote": true
+		}
+	]
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
