@@ -19,7 +19,7 @@ function json(data: unknown, status = 200) {
     headers: {
       "Content-Type": "application/json",
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
     },
   });
@@ -392,7 +392,7 @@ async function callGeminiFlash(
         ],
         generationConfig: {
           temperature: 0.3,
-          maxOutputTokens: 300,
+          maxOutputTokens: 900,
         },
       }),
     }
@@ -402,10 +402,14 @@ async function callGeminiFlash(
 
   const data = (await res.json()) as GeminiResponse;
 
-  return (
-    data.candidates?.[0]?.content?.parts?.[0]?.text ??
-    "Sorry, I couldn’t generate a response."
-  );
+  const candidates = data.candidates ?? [];
+  for (const candidate of candidates) {
+    const parts = candidate.content?.parts ?? [];
+    const text = parts.map((p) => p.text ?? "").join("").trim();
+    if (text) return text;
+  }
+
+  return "Sorry, I couldn’t generate a response.";
 }
 
 // ================== EMBEDDING ==================
@@ -490,7 +494,7 @@ export default {
         status: 204,
         headers: {
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type, Authorization",
         },
       });
@@ -678,10 +682,51 @@ export default {
       return json({ project });
     }
 
+    // ---------- DELETE PROJECT ----------
+    if (req.method === "DELETE" && url.pathname.startsWith("/projects/")) {
+      const parts = url.pathname.split("/").filter(Boolean);
+      const projectId = parts[1];
+
+      if (parts.length !== 2 || !projectId || projectId === "ingest" || projectId === "upload") {
+        return json({ error: "Not Found" }, 404);
+      }
+
+      const project = await env.chattydevs_db
+        .prepare("SELECT id FROM projects WHERE id = ? AND user_id = ?")
+        .bind(projectId, user.id)
+        .first<{ id: string }>();
+
+      if (!project?.id) return json({ error: "Not Found" }, 404);
+
+      await env.chattydevs_db
+        .prepare("DELETE FROM chats WHERE project_id = ?")
+        .bind(projectId)
+        .run();
+
+      await env.chattydevs_db
+        .prepare("DELETE FROM projects WHERE id = ? AND user_id = ?")
+        .bind(projectId, user.id)
+        .run();
+
+      fetch(`${env.FASTAPI_URL}/projects/delete`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.INTERNAL_SERVICE_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ project_id: projectId }),
+      }).catch((e) => {
+        console.error("FASTAPI_DELETE_ERROR", e);
+      });
+
+      return json({ ok: true, project_id: projectId });
+    }
+
     // ---------- CREATE PROJECT ----------
     if (req.method === "POST" && url.pathname === "/projects") {
-      const body = (await req.json().catch(() => null)) as { domain?: string } | null;
-      if (!body?.domain) return json({ error: "domain is required" }, 400);
+      const body = (await req.json().catch(() => null)) as { name?: string; domain?: string } | null;
+      const name = (body?.name ?? body?.domain ?? "").trim();
+      if (!name) return json({ error: "name is required" }, 400);
 
       const sub = await getActiveSubscription(env, user.id, PRODUCT_AXION_ID);
       const plan = sub ? await getPlanById(env, sub.plan_id) : null;
@@ -695,8 +740,14 @@ export default {
         return json({ error: "forbidden" }, 403);
       }
 
+      const existing = await env.chattydevs_db
+        .prepare("SELECT id FROM projects WHERE user_id = ? AND lower(domain) = lower(?) LIMIT 1")
+        .bind(user.id, name)
+        .first<{ id: string }>();
+      if (existing?.id) return json({ error: "project name already exists" }, 409);
+
       const projectId = crypto.randomUUID();
-      const defaultAllowedSources = normalizeDomainLikeInput(body.domain);
+      const defaultAllowedSources: string | null = null;
 
       await env.chattydevs_db
         .prepare(
@@ -706,7 +757,7 @@ export default {
         .bind(
           projectId,
           user.id,
-          body.domain,
+          name,
           new Date().toISOString(),
           defaultAllowedSources,
           null
@@ -718,7 +769,7 @@ export default {
         .bind(PRODUCT_AXION_ID, projectId)
         .run();
 
-      return json({ project_id: projectId, domain: body.domain });
+      return json({ project_id: projectId, domain: name, name });
     }
 
     // ---------- UPDATE PROJECT SETTINGS ----------
